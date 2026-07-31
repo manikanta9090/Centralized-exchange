@@ -1,4 +1,5 @@
 import cors from "cors";
+import { appRouter } from "./routes/index.js";
 import express, {
   type NextFunction,
   type Request,
@@ -10,6 +11,8 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
+
+app.use(appRouter);
 
 app.get("/health", async (_req, res) => {
   res.json({ ok: true });

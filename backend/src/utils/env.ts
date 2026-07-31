@@ -12,4 +12,6 @@ function readRequiredEnv(name: string): string {
 
 export const env = {
   port: Number(process.env.PORT ?? "3000"),
+  jwtSecret: readRequiredEnv("JWT_SECRET"),
+  databaseUrl: readRequiredEnv("DATABASE_URL"),
 };
