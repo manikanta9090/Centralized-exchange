@@ -1,5 +1,6 @@
 import cors from "cors";
 import { appRouter } from "./routes/index.js";
+import { engineClient } from "./utils/engine-client.js";
 import express, {
   type NextFunction,
   type Request,
@@ -27,6 +28,8 @@ app.use(
     });
   },
 );
+
+await engineClient.connect();
 
 app.listen(env.port, () => {
   console.log(`Backend running on http://localhost:${env.port}`);
