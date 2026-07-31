@@ -1,5 +1,6 @@
 import { createClient, type RedisClientType } from "redis";
 import { env } from "./utils/env.js";
+import { handleDeposit } from "./handlers/deposit-handler.js";
 
 interface EngineRequest {
   correlationId?: string;
@@ -62,14 +63,29 @@ class RedisManager {
           continue;
         }
 
-        const response = {
-          correlationId: message.correlationId,
-          data: {
-            ok: true,
-            type: message.type,
-            payload: message.payload,
-          },
-        };
+        let data: unknown;
+
+switch (message.type) {
+  case "DEPOSIT":
+    data = handleDeposit(
+      message.payload as {
+        userId: string;
+        asset: string;
+        amount: number;
+      },
+    );
+    break;
+
+  default:
+    throw new Error(
+      `Unknown engine request type: ${message.type}`,
+    );
+}
+
+const response = {
+  correlationId: message.correlationId,
+  data,
+};
 
         await this.client.publish(
           message.responseQueue,
