@@ -15,12 +15,12 @@ class EngineClient {
   >();
 
   constructor() {
-    // Main Redis client — used for sending requests to the engine
+    // Used to send requests to the engine
     this.redis = createClient({
       url: env.redisUrl,
     });
 
-    // Separate Redis client — will listen for engine responses
+    // Separate connection used to listen for engine responses
     this.subscriber = this.redis.duplicate();
 
     this.redis.on("error", (error) => {
@@ -32,19 +32,65 @@ class EngineClient {
     });
   }
 
- async connect(): Promise<void> {
-  if (!this.redis.isOpen) {
-    await this.redis.connect();
+  async connect(): Promise<void> {
+    if (!this.redis.isOpen) {
+      await this.redis.connect();
+    }
+
+    if (!this.subscriber.isOpen) {
+      await this.subscriber.connect();
+    }
+
+    await this.listenForResponses();
+
+    console.log("Connected to Redis");
   }
 
-  if (!this.subscriber.isOpen) {
-    await this.subscriber.connect();
+  private async listenForResponses(): Promise<void> {
+    await this.subscriber.subscribe(
+      env.responseQueue,
+      (message) => {
+        try {
+          const response = JSON.parse(message);
+
+          const correlationId = response.correlationId;
+
+          if (!correlationId) {
+            console.error(
+              "Engine response missing correlationId:",
+              response,
+            );
+            return;
+          }
+
+          const pending =
+            this.pendingRequests.get(correlationId);
+
+          if (!pending) {
+            return;
+          }
+
+          clearTimeout(pending.timeout);
+
+          this.pendingRequests.delete(correlationId);
+
+          if (response.error) {
+            pending.reject(
+              new Error(response.error),
+            );
+            return;
+          }
+
+          pending.resolve(response.data);
+        } catch (error) {
+          console.error(
+            "Failed to process engine response:",
+            error,
+          );
+        }
+      },
+    );
   }
-
-  await this.listenForResponses();
-
-  console.log("Connected to Redis");
-}
 
   async sendRequest<T>(
     type: string,
@@ -83,7 +129,11 @@ class EngineClient {
         )
         .catch((error) => {
           clearTimeout(timeout);
-          this.pendingRequests.delete(correlationId);
+
+          this.pendingRequests.delete(
+            correlationId,
+          );
+
           reject(error);
         });
     });
