@@ -36,20 +36,25 @@ class RedisManager {
     );
 
     while (true) {
+      const result = await this.client.blPop(
+        env.incomingQueue,
+        0,
+      );
+
+      if (!result) {
+        continue;
+      }
+
+      let message: EngineRequest;
+
       try {
-        const result = await this.client.blPop(
-          env.incomingQueue,
-          0,
-        );
+        message = JSON.parse(result.element);
+      } catch (error) {
+        console.error("Invalid request:", error);
+        continue;
+      }
 
-        if (!result) {
-          continue;
-        }
-
-        const message: EngineRequest = JSON.parse(
-          result.element,
-        );
-
+      try {
         console.log("Received engine request:");
         console.log(message);
 
@@ -57,49 +62,55 @@ class RedisManager {
           !message.correlationId ||
           !message.responseQueue
         ) {
-          console.log(
-            "Request has no correlationId/responseQueue; skipping response",
+          throw new Error(
+            "Missing correlationId or responseQueue",
           );
-          continue;
         }
 
         let data: unknown;
 
-switch (message.type) {
-  case "DEPOSIT":
-    data = handleDeposit(
-      message.payload as {
-        userId: string;
-        asset: string;
-        amount: number;
-      },
-    );
-    break;
+        switch (message.type) {
+          case "DEPOSIT":
+            data = handleDeposit(
+              message.payload as {
+                userId: string;
+                asset: string;
+                amount: number;
+              },
+            );
+            break;
 
-  default:
-    throw new Error(
-      `Unknown engine request type: ${message.type}`,
-    );
-}
-
-const response = {
-  correlationId: message.correlationId,
-  data,
-};
+          default:
+            throw new Error(
+              `Unknown request type: ${message.type}`,
+            );
+        }
 
         await this.client.publish(
           message.responseQueue,
-          JSON.stringify(response),
-        );
-
-        console.log(
-          `Response sent for: ${message.correlationId}`,
+          JSON.stringify({
+            correlationId: message.correlationId,
+            data,
+          }),
         );
       } catch (error) {
-        console.error(
-          "Failed to process engine request:",
-          error,
-        );
+        console.error(error);
+
+        if (
+          message.correlationId &&
+          message.responseQueue
+        ) {
+          await this.client.publish(
+            message.responseQueue,
+            JSON.stringify({
+              correlationId: message.correlationId,
+              error:
+                error instanceof Error
+                  ? error.message
+                  : "unknown_error",
+            }),
+          );
+        }
       }
     }
   }
