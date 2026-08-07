@@ -1,6 +1,7 @@
 import { createClient, type RedisClientType } from "redis";
 import { env } from "./utils/env.js";
 import { handleDeposit } from "./handlers/deposit-handler.js";
+import { handleWithdraw } from "./handlers/withdraw-handler.js";
 
 interface EngineRequest {
   correlationId?: string;
@@ -70,17 +71,27 @@ class RedisManager {
         let data: unknown;
 
         switch (message.type) {
-          case "DEPOSIT":
-            data = handleDeposit(
-              message.payload as {
-                userId: string;
-                asset: string;
-                amount: number;
-              },
-            );
-            break;
+  case "DEPOSIT":
+    data = handleDeposit(
+      message.payload as {
+        userId: string;
+        asset: string;
+        amount: number;
+      },
+    );
+    break;
 
-          default:
+  case "WITHDRAW":
+    data = handleWithdraw(
+      message.payload as {
+        userId: string;
+        asset: string;
+        amount: number;
+      },
+    );
+    break;
+
+    default:
             throw new Error(
               `Unknown request type: ${message.type}`,
             );
