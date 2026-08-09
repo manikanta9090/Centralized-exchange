@@ -1,5 +1,10 @@
-import { ORDER_BOOK, type Order } from "../store/order-book.js";
+import {
+  ORDER_BOOK,
+  type Order,
+} from "../store/order-book.js";
 import { BALANCES } from "../store/exchange-store.js";
+import { matchOrders } from "../matching-engine.js";
+import { settleTrade } from "../settlement.js";
 
 interface OrderPayload {
   userId: string;
@@ -9,7 +14,9 @@ interface OrderPayload {
   quantity: number;
 }
 
-export function handleOrder(payload: OrderPayload) {
+export function handleOrder(
+  payload: OrderPayload,
+) {
   const {
     userId,
     market,
@@ -31,11 +38,18 @@ export function handleOrder(payload: OrderPayload) {
   }
 
   if (!Number.isFinite(price) || price <= 0) {
-    throw new Error("price must be greater than 0");
+    throw new Error(
+      "price must be greater than 0",
+    );
   }
 
-  if (!Number.isFinite(quantity) || quantity <= 0) {
-    throw new Error("quantity must be greater than 0");
+  if (
+    !Number.isFinite(quantity) ||
+    quantity <= 0
+  ) {
+    throw new Error(
+      "quantity must be greater than 0",
+    );
   }
 
   const userBalances = BALANCES.get(userId);
@@ -44,7 +58,8 @@ export function handleOrder(payload: OrderPayload) {
     throw new Error("user balance not found");
   }
 
-  const [baseAsset, quoteAsset] = market.split("_");
+  const [baseAsset, quoteAsset] =
+    market.split("_");
 
   if (!baseAsset || !quoteAsset) {
     throw new Error(
@@ -52,10 +67,13 @@ export function handleOrder(payload: OrderPayload) {
     );
   }
 
+  // Lock funds before placing the order
   if (side === "BUY") {
-    const requiredAmount = price * quantity;
+    const requiredAmount =
+      price * quantity;
 
-    const quoteBalance = userBalances[quoteAsset];
+    const quoteBalance =
+      userBalances[quoteAsset];
 
     if (!quoteBalance) {
       throw new Error(
@@ -63,18 +81,25 @@ export function handleOrder(payload: OrderPayload) {
       );
     }
 
-    if (quoteBalance.available < requiredAmount) {
+    if (
+      quoteBalance.available <
+      requiredAmount
+    ) {
       throw new Error(
         `insufficient ${quoteAsset} balance`,
       );
     }
 
-    quoteBalance.available -= requiredAmount;
-    quoteBalance.locked += requiredAmount;
+    quoteBalance.available -=
+      requiredAmount;
+
+    quoteBalance.locked +=
+      requiredAmount;
   }
 
   if (side === "SELL") {
-    const baseBalance = userBalances[baseAsset];
+    const baseBalance =
+      userBalances[baseAsset];
 
     if (!baseBalance) {
       throw new Error(
@@ -82,16 +107,21 @@ export function handleOrder(payload: OrderPayload) {
       );
     }
 
-    if (baseBalance.available < quantity) {
+    if (
+      baseBalance.available <
+      quantity
+    ) {
       throw new Error(
         `insufficient ${baseAsset} balance`,
       );
     }
 
     baseBalance.available -= quantity;
+
     baseBalance.locked += quantity;
   }
 
+  // Get or create order book
   let book = ORDER_BOOK.get(market);
 
   if (!book) {
@@ -113,6 +143,7 @@ export function handleOrder(payload: OrderPayload) {
     filledQuantity: 0,
   };
 
+  // Add order to order book
   if (side === "BUY") {
     book.bids.push(order);
 
@@ -121,7 +152,9 @@ export function handleOrder(payload: OrderPayload) {
         return b.price - a.price;
       }
 
-      return a.orderId.localeCompare(b.orderId);
+      return a.orderId.localeCompare(
+        b.orderId,
+      );
     });
   } else {
     book.asks.push(order);
@@ -131,12 +164,23 @@ export function handleOrder(payload: OrderPayload) {
         return a.price - b.price;
       }
 
-      return a.orderId.localeCompare(b.orderId);
+      return a.orderId.localeCompare(
+        b.orderId,
+      );
     });
+  }
+
+  // Try to match orders
+  const trades = matchOrders(market);
+
+  // Settle every matched trade
+  for (const trade of trades) {
+    settleTrade(trade);
   }
 
   return {
     order,
+    trades,
     orderBook: book,
     balances: userBalances,
   };
