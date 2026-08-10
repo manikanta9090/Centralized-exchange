@@ -3,6 +3,7 @@ import { env } from "./utils/env.js";
 import { handleDeposit } from "./handlers/deposit-handler.js";
 import { handleWithdraw } from "./handlers/withdraw-handler.js";
 import { handleOrder } from "./handlers/order-handler.js";
+import { handleBalance } from "./handlers/balance-handler.js";
 
 interface EngineRequest {
   correlationId?: string;
@@ -103,6 +104,15 @@ class RedisManager {
     },
   );
   break;
+
+  case "BALANCE":
+    data = handleBalance(
+      message.payload as {
+        userId: string;
+        asset?: string;
+      },
+    );
+    break;
 
     default:
             throw new Error(
