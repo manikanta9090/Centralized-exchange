@@ -1,5 +1,20 @@
-import { createClient, type RedisClientType } from "redis";
+import {
+  createClient,
+  type RedisClientType,
+} from "redis";
 import { env } from "./env.js";
+
+interface PendingRequest {
+  resolve: (value: unknown) => void;
+  reject: (reason?: unknown) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
+interface EngineResponse {
+  correlationId: string;
+  data?: unknown;
+  error?: string;
+}
 
 class EngineClient {
   private redis: RedisClientType;
@@ -7,28 +22,46 @@ class EngineClient {
 
   private pendingRequests = new Map<
     string,
-    {
-      resolve: (value: unknown) => void;
-      reject: (reason?: unknown) => void;
-      timeout: ReturnType<typeof setTimeout>;
-    }
+    PendingRequest
   >();
 
+  private responseListenerStarted = false;
+
   constructor() {
-    // Used to send requests to the engine
     this.redis = createClient({
       url: env.redisUrl,
     });
 
-    // Separate connection used to listen for engine responses
     this.subscriber = this.redis.duplicate();
 
     this.redis.on("error", (error) => {
-      console.error("Redis client error:", error);
+      console.error(
+        "Redis client error:",
+        error,
+      );
     });
 
     this.subscriber.on("error", (error) => {
-      console.error("Redis subscriber error:", error);
+      console.error(
+        "Redis subscriber error:",
+        error,
+      );
+    });
+
+    this.redis.on("connect", () => {
+      console.log("Redis client connecting...");
+    });
+
+    this.redis.on("ready", () => {
+      console.log("Redis client ready");
+    });
+
+    this.redis.on("end", () => {
+      console.log("Redis client connection closed");
+    });
+
+    this.subscriber.on("ready", () => {
+      console.log("Redis subscriber ready");
     });
   }
 
@@ -41,43 +74,56 @@ class EngineClient {
       await this.subscriber.connect();
     }
 
-    await this.listenForResponses();
-
     console.log("Connected to Redis");
+
+    if (!this.responseListenerStarted) {
+      this.responseListenerStarted = true;
+
+      await this.listenForResponses();
+    }
   }
 
   private async listenForResponses(): Promise<void> {
+    console.log(
+      `Listening for engine responses on: ${env.responseQueue}`,
+    );
+
     await this.subscriber.subscribe(
       env.responseQueue,
       (message) => {
         try {
-          const response = JSON.parse(message);
+          const response =
+            JSON.parse(message) as EngineResponse;
 
-          const correlationId = response.correlationId;
-
-          if (!correlationId) {
-            console.error(
-              "Engine response missing correlationId:",
-              response,
-            );
-            return;
-          }
+          console.log(
+            "Received engine response:",
+            response,
+          );
 
           const pending =
-            this.pendingRequests.get(correlationId);
+            this.pendingRequests.get(
+              response.correlationId,
+            );
 
           if (!pending) {
+            console.warn(
+              `No pending request found for correlationId: ${response.correlationId}`,
+            );
+
             return;
           }
 
           clearTimeout(pending.timeout);
 
-          this.pendingRequests.delete(correlationId);
+          this.pendingRequests.delete(
+            response.correlationId,
+          );
 
           if (response.error) {
             pending.reject(
               new Error(response.error),
             );
+
             return;
           }
 
@@ -96,7 +142,21 @@ class EngineClient {
     type: string,
     payload: unknown,
   ): Promise<T> {
-    const correlationId = crypto.randomUUID();
+    /*
+     * Safety check:
+     * If the backend somehow tries to send a request
+     * before Redis is connected, connect first.
+     */
+    if (!this.redis.isOpen) {
+      console.log(
+        "Redis client is closed. Connecting...",
+      );
+
+      await this.connect();
+    }
+
+    const correlationId =
+      crypto.randomUUID();
 
     const message = {
       correlationId,
@@ -105,39 +165,61 @@ class EngineClient {
       payload,
     };
 
-    return new Promise<T>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pendingRequests.delete(correlationId);
+    console.log(
+      `Sending engine request: ${type}`,
+    );
 
-        reject(
-          new Error(
-            `Engine request timed out after ${env.engineTimeoutMs}ms`,
-          ),
+    return new Promise<T>(
+      async (resolve, reject) => {
+        const timeout = setTimeout(() => {
+          this.pendingRequests.delete(
+            correlationId,
+          );
+
+          reject(
+            new Error(
+              `Engine request timed out after ${env.engineTimeoutMs}ms`,
+            ),
+          );
+        }, env.engineTimeoutMs);
+
+        this.pendingRequests.set(
+          correlationId,
+          {
+            resolve: (value) =>
+              resolve(value as T),
+            reject,
+            timeout,
+          },
         );
-      }, env.engineTimeoutMs);
 
-      this.pendingRequests.set(correlationId, {
-        resolve: (value) => resolve(value as T),
-        reject,
-        timeout,
-      });
+        try {
+          await this.redis.rPush(
+            env.incomingQueue,
+            JSON.stringify(message),
+          );
 
-      this.redis
-        .rPush(
-          env.incomingQueue,
-          JSON.stringify(message),
-        )
-        .catch((error) => {
+          console.log(
+            `Engine request sent: ${type}`,
+          );
+        } catch (error) {
           clearTimeout(timeout);
 
           this.pendingRequests.delete(
             correlationId,
           );
 
+          console.error(
+            "Failed to send engine request:",
+            error,
+          );
+
           reject(error);
-        });
-    });
+        }
+      },
+    );
   }
 }
 
-export const engineClient = new EngineClient();
+export const engineClient =
+  new EngineClient();

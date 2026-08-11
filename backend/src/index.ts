@@ -1,12 +1,9 @@
+import express from "express";
 import cors from "cors";
+
+import { env } from "./utils/env.js";
 import { appRouter } from "./routes/index.js";
 import { engineClient } from "./utils/engine-client.js";
-import express, {
-  type NextFunction,
-  type Request,
-  type Response,
-} from "express";
-import { env } from "./utils/env.js";
 
 const app = express();
 
@@ -15,22 +12,57 @@ app.use(express.json());
 
 app.use(appRouter);
 
-app.get("/health", async (_req, res) => {
-  res.json({ ok: true });
+app.use((req, res) => {
+  console.error(
+    `Route not found: ${req.method} ${req.originalUrl}`,
+  );
+
+  res.status(404).json({
+    error: "route_not_found",
+    method: req.method,
+    path: req.originalUrl,
+  });
 });
 
 app.use(
-  (err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    console.error(err);
+  (
+    error: unknown,
+    req: express.Request,
+    res: express.Response,
+    _next: express.NextFunction,
+  ) => {
+    console.error(
+      `Request failed: ${req.method} ${req.originalUrl}`,
+    );
+
+    console.error(error);
 
     res.status(500).json({
-      error: err instanceof Error ? err.message : "internal_server_error",
+      error:
+        error instanceof Error
+          ? error.message
+          : "internal_server_error",
     });
   },
 );
 
-await engineClient.connect();
+async function startServer(): Promise<void> {
+  try {
+    await engineClient.connect();
 
-app.listen(env.port, () => {
-  console.log(`Backend running on http://localhost:${env.port}`);
-});
+    app.listen(env.port, () => {
+      console.log(
+        `Backend running on http://localhost:${env.port}`,
+      );
+    });
+  } catch (error) {
+    console.error(
+      "Failed to start backend:",
+      error,
+    );
+
+    process.exit(1);
+  }
+}
+
+startServer();
