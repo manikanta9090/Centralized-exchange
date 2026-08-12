@@ -59,3 +59,58 @@ export async function placeOrder(
 
   res.status(200).json(result);
 }
+
+export async function cancelOrder(
+  req: AuthenticatedRequest,
+  res: Response,
+): Promise<void> {
+  if (!req.userId) {
+    res.status(401).json({
+      error: "unauthorized",
+    });
+    return;
+  }
+
+  const { orderId } = req.params;
+
+  if (!orderId) {
+    res.status(400).json({
+      error: "orderId is required",
+    });
+    return;
+  }
+
+  try {
+    console.log(
+      `Cancelling order ${orderId} for user ${req.userId}`,
+    );
+
+    const result =
+      await engineClient.sendRequest(
+        "CANCEL_ORDER",
+        {
+          userId: req.userId,
+          orderId,
+        },
+      );
+
+    console.log(
+      "Order cancellation response:",
+      result,
+    );
+
+    res.status(200).json(result);
+  } catch (error) {
+    console.error(
+      "Order cancellation failed:",
+      error,
+    );
+
+    res.status(400).json({
+      error:
+        error instanceof Error
+          ? error.message
+          : "order_cancellation_failed",
+    });
+  }
+}

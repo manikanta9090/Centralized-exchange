@@ -2,8 +2,11 @@ import { createClient, type RedisClientType } from "redis";
 import { env } from "./utils/env.js";
 import { handleDeposit } from "./handlers/deposit-handler.js";
 import { handleWithdraw } from "./handlers/withdraw-handler.js";
-import { handleOrder } from "./handlers/order-handler.js";
 import { handleBalance } from "./handlers/balance-handler.js";
+import {
+  handleOrder,
+  handleCancelOrder,
+} from "./handlers/order-handler.js";
 
 interface EngineRequest {
   correlationId?: string;
@@ -89,6 +92,15 @@ class RedisManager {
         userId: string;
         asset: string;
         amount: number;
+      },
+    );
+    break;
+
+    case "CANCEL_ORDER":
+    data = handleCancelOrder(
+      message.payload as {
+        userId: string;
+        orderId: string;
       },
     );
     break;
