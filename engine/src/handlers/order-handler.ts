@@ -19,6 +19,11 @@ interface CancelOrderPayload {
   orderId: string;
 }
 
+interface GetOrderPayload {
+  userId: string;
+  orderId: string;
+}
+
 export function handleOrder(
   payload: OrderPayload,
 ) {
@@ -39,7 +44,9 @@ export function handleOrder(
   }
 
   if (side !== "BUY" && side !== "SELL") {
-    throw new Error("side must be BUY or SELL");
+    throw new Error(
+      "side must be BUY or SELL",
+    );
   }
 
   if (!Number.isFinite(price) || price <= 0) {
@@ -298,10 +305,8 @@ function cancelOrderFromBook(
     );
   }
 
-  /*
-   * Release the funds belonging to
-   * the remaining unfilled quantity.
-   */
+  // Release the funds belonging to
+  // the remaining unfilled quantity.
   if (order.side === "BUY") {
     const quoteBalance =
       userBalances[quoteAsset];
@@ -379,4 +384,57 @@ function cancelOrderFromBook(
     orderBook:
       ORDER_BOOK.get(market),
   };
+}
+
+/**
+ * Get an existing order.
+ */
+export function handleGetOrder(
+  payload: GetOrderPayload,
+) {
+  const {
+    userId,
+    orderId,
+  } = payload;
+
+  if (!userId) {
+    throw new Error("userId is required");
+  }
+
+  if (!orderId) {
+    throw new Error("orderId is required");
+  }
+
+  // Search through all market order books.
+  for (const book of ORDER_BOOK.values()) {
+    const order =
+      book.bids.find(
+        (item) =>
+          item.orderId === orderId,
+      ) ??
+      book.asks.find(
+        (item) =>
+          item.orderId === orderId,
+      );
+
+    if (!order) {
+      continue;
+    }
+
+    // The order must belong to the requesting user.
+    if (order.userId !== userId) {
+      throw new Error("order not found");
+    }
+
+    const remainingQuantity =
+      order.quantity -
+      order.filledQuantity;
+
+    return {
+      order,
+      remainingQuantity,
+    };
+  }
+
+  throw new Error("order not found");
 }

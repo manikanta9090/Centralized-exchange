@@ -114,3 +114,60 @@ export async function cancelOrder(
     });
   }
 }
+
+export async function getOrder(
+  req: AuthenticatedRequest,
+  res: Response,
+): Promise<void> {
+  if (!req.userId) {
+    res.status(401).json({
+      error: "unauthorized",
+    });
+
+    return;
+  }
+
+  const { orderId } = req.params;
+
+  if (!orderId) {
+    res.status(400).json({
+      error: "orderId is required",
+    });
+
+    return;
+  }
+
+  try {
+    console.log(
+      `Getting order ${orderId} for user ${req.userId}`,
+    );
+
+    const result =
+      await engineClient.sendRequest(
+        "GET_ORDER",
+        {
+          userId: req.userId,
+          orderId,
+        },
+      );
+
+    console.log(
+      "Order retrieval response:",
+      result,
+    );
+
+    res.status(200).json(result);
+  } catch (error) {
+    console.error(
+      "Order retrieval failed:",
+      error,
+    );
+
+    res.status(404).json({
+      error:
+        error instanceof Error
+          ? error.message
+          : "order_not_found",
+    });
+  }
+}

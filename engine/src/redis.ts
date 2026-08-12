@@ -6,6 +6,7 @@ import { handleBalance } from "./handlers/balance-handler.js";
 import {
   handleOrder,
   handleCancelOrder,
+  handleGetOrder,
 } from "./handlers/order-handler.js";
 
 interface EngineRequest {
@@ -95,6 +96,15 @@ class RedisManager {
       },
     );
     break;
+
+    case "GET_ORDER":
+  data = handleGetOrder(
+    message.payload as {
+      userId: string;
+      orderId: string;
+    },
+  );
+  break;
 
     case "CANCEL_ORDER":
     data = handleCancelOrder(
