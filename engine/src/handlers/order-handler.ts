@@ -1,10 +1,27 @@
 import {
   ORDER_BOOK,
+  ORDERS,
+  getRemainingQuantity,
+  nextOrderSequence,
   type Order,
+  type OrderBook,
 } from "../store/order-book.js";
-import { BALANCES } from "../store/exchange-store.js";
+import {
+  BALANCES,
+  type UserBalances,
+} from "../store/exchange-store.js";
+import {
+  createEngineSnapshot,
+  restoreEngineSnapshot,
+} from "../store/snapshot.js";
 import { matchOrders } from "../matching-engine.js";
-import { settleTrade } from "../settlement.js";
+import {
+  commitMatchingPlan,
+  removeOrderFromBook,
+  validateMatchingPlan,
+} from "../matching-executor.js";
+import { releaseOrderReservedFunds } from "../settlement.js";
+import { parseMarket } from "../utils/market.js";
 
 interface OrderPayload {
   userId: string;
@@ -24,65 +41,115 @@ interface GetOrderPayload {
   orderId: string;
 }
 
-export function handleOrder(
+function assertNonEmptyString(
+  value: unknown,
+  name: string,
+): asserts value is string {
+  if (
+    typeof value !== "string" ||
+    value.trim().length === 0
+  ) {
+    throw new Error(`${name} is required`);
+  }
+}
+
+function assertPayloadObject(
+  payload: unknown,
+  name: string,
+): void {
+  if (
+    payload === null ||
+    typeof payload !== "object"
+  ) {
+    throw new Error(`${name} payload is required`);
+  }
+}
+
+function validateOrderPayload(
   payload: OrderPayload,
-) {
-  const {
+): {
+  userId: string;
+  market: string;
+  side: "BUY" | "SELL";
+  price: number;
+  quantity: number;
+} {
+  assertPayloadObject(payload, "order");
+
+  const userId = payload.userId as unknown;
+  const market = payload.market;
+  const side = payload.side as unknown;
+  const price = payload.price as unknown;
+  const quantity = payload.quantity as unknown;
+
+  assertNonEmptyString(userId, "userId");
+
+  if (side !== "BUY" && side !== "SELL") {
+    throw new Error("side must be BUY or SELL");
+  }
+
+  if (
+    typeof price !== "number" ||
+    !Number.isFinite(price) ||
+    price <= 0
+  ) {
+    throw new Error(
+      "price must be a finite number greater than 0",
+    );
+  }
+
+  if (
+    typeof quantity !== "number" ||
+    !Number.isFinite(quantity) ||
+    quantity <= 0
+  ) {
+    throw new Error(
+      "quantity must be a finite number greater than 0",
+    );
+  }
+
+  parseMarket(market);
+
+  return {
     userId,
     market,
     side,
     price,
     quantity,
-  } = payload;
+  };
+}
 
-  if (!userId) {
-    throw new Error("userId is required");
-  }
-
-  if (!market) {
-    throw new Error("market is required");
-  }
-
-  if (side !== "BUY" && side !== "SELL") {
-    throw new Error(
-      "side must be BUY or SELL",
-    );
-  }
-
-  if (!Number.isFinite(price) || price <= 0) {
-    throw new Error(
-      "price must be greater than 0",
-    );
-  }
-
-  if (
-    !Number.isFinite(quantity) ||
-    quantity <= 0
-  ) {
-    throw new Error(
-      "quantity must be greater than 0",
-    );
-  }
-
+function getUserBalances(
+  userId: string,
+): UserBalances {
   const userBalances = BALANCES.get(userId);
 
   if (!userBalances) {
     throw new Error("user balance not found");
   }
 
-  const [baseAsset, quoteAsset] =
-    market.split("_");
+  return userBalances;
+}
 
-  if (!baseAsset || !quoteAsset) {
-    throw new Error(
-      "market must use BASE_QUOTE format",
-    );
-  }
-
-  // Lock funds before placing the order
+function reserveOrderFunds(
+  userBalances: UserBalances,
+  side: "BUY" | "SELL",
+  price: number,
+  quantity: number,
+  baseAsset: string,
+  quoteAsset: string,
+): void {
   if (side === "BUY") {
-    const requiredAmount =
-      price * quantity;
+    const requiredAmount = price * quantity;
+
+    if (
+      !Number.isFinite(requiredAmount) ||
+      requiredAmount <= 0
+    ) {
+      throw new Error(
+        "order value must be a finite number greater than 0",
+      );
+    }
 
     const quoteBalance =
       userBalances[quoteAsset];
@@ -93,356 +160,232 @@ export function handleOrder(
       );
     }
 
-    if (
-      quoteBalance.available <
-      requiredAmount
-    ) {
+    if (quoteBalance.available < requiredAmount) {
       throw new Error(
         `insufficient ${quoteAsset} balance`,
       );
     }
 
-    quoteBalance.available -=
-      requiredAmount;
+    quoteBalance.available -= requiredAmount;
+    quoteBalance.locked += requiredAmount;
 
-    quoteBalance.locked +=
-      requiredAmount;
+    return;
   }
 
-  if (side === "SELL") {
-    const baseBalance =
-      userBalances[baseAsset];
+  const baseBalance = userBalances[baseAsset];
 
-    if (!baseBalance) {
-      throw new Error(
-        `No balance found for ${baseAsset}`,
-      );
+  if (!baseBalance) {
+    throw new Error(
+      `No balance found for ${baseAsset}`,
+    );
+  }
+
+  if (baseBalance.available < quantity) {
+    throw new Error(
+      `insufficient ${baseAsset} balance`,
+    );
+  }
+
+  baseBalance.available -= quantity;
+  baseBalance.locked += quantity;
+}
+
+function getOrCreateBook(market: string): OrderBook {
+  const existing = ORDER_BOOK.get(market);
+
+  if (existing) {
+    return existing;
+  }
+
+  const book: OrderBook = {
+    bids: [],
+    asks: [],
+  };
+
+  ORDER_BOOK.set(market, book);
+
+  return book;
+}
+
+function addOrderToBook(
+  book: OrderBook,
+  order: Order,
+): void {
+  if (order.side === "BUY") {
+    book.bids.push(order);
+
+    book.bids.sort((a, b) => {
+      if (a.price !== b.price) {
+        return b.price - a.price;
+      }
+
+      return a.sequence - b.sequence;
+    });
+
+    return;
+  }
+
+  book.asks.push(order);
+
+  book.asks.sort((a, b) => {
+    if (a.price !== b.price) {
+      return a.price - b.price;
     }
 
-    if (
-      baseBalance.available <
-      quantity
-    ) {
-      throw new Error(
-        `insufficient ${baseAsset} balance`,
-      );
-    }
+    return a.sequence - b.sequence;
+  });
+}
 
-    baseBalance.available -= quantity;
-
-    baseBalance.locked += quantity;
-  }
-
-  // Get or create order book
-  let book = ORDER_BOOK.get(market);
-
-  if (!book) {
-    book = {
-      bids: [],
-      asks: [],
-    };
-
-    ORDER_BOOK.set(market, book);
-  }
-
-  const order: Order = {
-    orderId: crypto.randomUUID(),
+export function handleOrder(payload: OrderPayload) {
+  const {
     userId,
     market,
     side,
     price,
     quantity,
-    filledQuantity: 0,
-  };
+  } = validateOrderPayload(payload);
 
-  // Add order to order book
-  if (side === "BUY") {
-    book.bids.push(order);
+  const { baseAsset, quoteAsset } =
+    parseMarket(market);
 
-    book.bids.sort((a, b) => {
-      if (b.price !== a.price) {
-        return b.price - a.price;
-      }
+  const userBalances = getUserBalances(userId);
 
-      return a.orderId.localeCompare(
-        b.orderId,
-      );
-    });
-  } else {
-    book.asks.push(order);
+  const snapshot = createEngineSnapshot();
 
-    book.asks.sort((a, b) => {
-      if (a.price !== b.price) {
-        return a.price - b.price;
-      }
+  try {
+    reserveOrderFunds(
+      userBalances,
+      side,
+      price,
+      quantity,
+      baseAsset,
+      quoteAsset,
+    );
 
-      return a.orderId.localeCompare(
-        b.orderId,
-      );
-    });
+    const order: Order = {
+      orderId: crypto.randomUUID(),
+      userId,
+      market,
+      side,
+      price,
+      quantity,
+      filledQuantity: 0,
+      sequence: nextOrderSequence(),
+      status: "OPEN",
+      createdAt: Date.now(),
+    };
+
+    ORDERS.set(order.orderId, order);
+
+    const book = getOrCreateBook(market);
+
+    addOrderToBook(book, order);
+
+    const matchingPlan = matchOrders(
+      market,
+      order.orderId,
+    );
+
+    validateMatchingPlan(matchingPlan);
+    commitMatchingPlan(matchingPlan);
+
+    return {
+      order,
+      trades: matchingPlan.trades,
+      orderBook: book,
+      balances:
+        BALANCES.get(userId) ?? userBalances,
+    };
+  } catch (error) {
+    restoreEngineSnapshot(snapshot);
+    throw error;
   }
-
-  // Try to match orders
-  const trades = matchOrders(market);
-
-  // Settle every matched trade
-  for (const trade of trades) {
-    settleTrade(trade);
-  }
-
-  return {
-    order,
-    trades,
-    orderBook: book,
-    balances: userBalances,
-  };
 }
 
 /**
- * Cancel an existing open order.
+ * Cancel an existing open or partially filled order.
  */
 export function handleCancelOrder(
   payload: CancelOrderPayload,
 ) {
-  const {
-    userId,
-    orderId,
-  } = payload;
+  assertPayloadObject(payload, "cancel order");
 
-  if (!userId) {
-    throw new Error("userId is required");
+  const userId = payload.userId as unknown;
+  const orderId = payload.orderId as unknown;
+
+  assertNonEmptyString(userId, "userId");
+  assertNonEmptyString(orderId, "orderId");
+
+  const order = ORDERS.get(orderId);
+
+  if (!order) {
+    throw new Error("order not found");
   }
 
-  if (!orderId) {
-    throw new Error("orderId is required");
-  }
-
-  // Find the order in all markets.
-  for (const [market, book] of ORDER_BOOK) {
-    const bidIndex = book.bids.findIndex(
-      (order) =>
-        order.orderId === orderId,
-    );
-
-    if (bidIndex !== -1) {
-      const order =
-        book.bids[bidIndex];
-
-        if (!order) {
-  throw new Error("order not found");
-}
-
-      if (order.userId !== userId) {
-        throw new Error(
-          "you do not own this order",
-        );
-      }
-
-      return cancelOrderFromBook(
-        market,
-        book.bids,
-        bidIndex,
-        order,
-      );
-    }
-
-    const askIndex = book.asks.findIndex(
-      (order) =>
-        order.orderId === orderId,
-    );
-
-    if (askIndex !== -1) {
-      const order =
-        book.asks[askIndex];
-
-        if (!order) {
-  throw new Error("order not found");
-}
-
-      if (order.userId !== userId) {
-        throw new Error(
-          "you do not own this order",
-        );
-      }
-
-      return cancelOrderFromBook(
-        market,
-        book.asks,
-        askIndex,
-        order,
-      );
-    }
-  }
-
-  throw new Error(
-    "order not found or already filled",
-  );
-}
-
-function cancelOrderFromBook(
-  market: string,
-  orders: Order[],
-  index: number,
-  order: Order,
-) {
-  const userBalances =
-    BALANCES.get(order.userId);
-
-  if (!userBalances) {
+  if (order.userId !== userId) {
     throw new Error(
-      "user balance not found",
+      "you do not own this order",
     );
   }
 
-  const [baseAsset, quoteAsset] =
-    market.split("_");
+  const snapshot = createEngineSnapshot();
 
-  if (!baseAsset || !quoteAsset) {
-    throw new Error(
-      "market must use BASE_QUOTE format",
-    );
-  }
+  try {
+    const released = releaseOrderReservedFunds(order);
 
-  const remainingQuantity =
-    order.quantity -
-    order.filledQuantity;
-
-  if (remainingQuantity <= 0) {
-    throw new Error(
-      "order is already completely filled",
-    );
-  }
-
-  // Release the funds belonging to
-  // the remaining unfilled quantity.
-  if (order.side === "BUY") {
-    const quoteBalance =
-      userBalances[quoteAsset];
-
-    if (!quoteBalance) {
-      throw new Error(
-        `No balance found for ${quoteAsset}`,
-      );
-    }
-
-    const remainingLockedAmount =
-      order.price *
-      remainingQuantity;
+    order.status = "CANCELLED";
 
     if (
-      quoteBalance.locked <
-      remainingLockedAmount
+      !removeOrderFromBook(
+        order.market,
+        order.orderId,
+      )
     ) {
       throw new Error(
-        "locked balance is insufficient for cancellation",
+        "order not found in the order book",
       );
     }
 
-    quoteBalance.locked -=
-      remainingLockedAmount;
-
-    quoteBalance.available +=
-      remainingLockedAmount;
+    return {
+      order: {
+        ...order,
+        remainingQuantity:
+          getRemainingQuantity(order),
+      },
+      released,
+      balances: BALANCES.get(order.userId),
+      orderBook: ORDER_BOOK.get(order.market),
+    };
+  } catch (error) {
+    restoreEngineSnapshot(snapshot);
+    throw error;
   }
-
-  if (order.side === "SELL") {
-    const baseBalance =
-      userBalances[baseAsset];
-
-    if (!baseBalance) {
-      throw new Error(
-        `No balance found for ${baseAsset}`,
-      );
-    }
-
-    if (
-      baseBalance.locked <
-      remainingQuantity
-    ) {
-      throw new Error(
-        "locked balance is insufficient for cancellation",
-      );
-    }
-
-    baseBalance.locked -=
-      remainingQuantity;
-
-    baseBalance.available +=
-      remainingQuantity;
-  }
-
-  // Remove the order from the order book.
-  orders.splice(index, 1);
-
-  console.log(
-    `Order cancelled: ${order.orderId}`,
-  );
-
-  console.log(
-    `Released remaining quantity: ${remainingQuantity}`,
-  );
-
-  return {
-    order: {
-      ...order,
-      status: "CANCELLED",
-      remainingQuantity,
-    },
-    balances: userBalances,
-    orderBook:
-      ORDER_BOOK.get(market),
-  };
 }
 
 /**
- * Get an existing order.
+ * Get an existing order, including filled and cancelled orders, from
+ * the in-memory order registry.
  */
 export function handleGetOrder(
   payload: GetOrderPayload,
 ) {
-  const {
-    userId,
-    orderId,
-  } = payload;
+  assertPayloadObject(payload, "get order");
 
-  if (!userId) {
-    throw new Error("userId is required");
+  const userId = payload.userId as unknown;
+  const orderId = payload.orderId as unknown;
+
+  assertNonEmptyString(userId, "userId");
+  assertNonEmptyString(orderId, "orderId");
+
+  const order = ORDERS.get(orderId);
+
+  if (!order || order.userId !== userId) {
+    throw new Error("order not found");
   }
 
-  if (!orderId) {
-    throw new Error("orderId is required");
-  }
-
-  // Search through all market order books.
-  for (const book of ORDER_BOOK.values()) {
-    const order =
-      book.bids.find(
-        (item) =>
-          item.orderId === orderId,
-      ) ??
-      book.asks.find(
-        (item) =>
-          item.orderId === orderId,
-      );
-
-    if (!order) {
-      continue;
-    }
-
-    // The order must belong to the requesting user.
-    if (order.userId !== userId) {
-      throw new Error("order not found");
-    }
-
-    const remainingQuantity =
-      order.quantity -
-      order.filledQuantity;
-
-    return {
-      order,
-      remainingQuantity,
-    };
-  }
-
-  throw new Error("order not found");
+  return {
+    order,
+    remainingQuantity:
+      getRemainingQuantity(order),
+  };
 }

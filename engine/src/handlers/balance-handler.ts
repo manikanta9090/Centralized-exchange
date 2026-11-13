@@ -1,4 +1,5 @@
 import { BALANCES } from "../store/exchange-store.js";
+import { assertAssetName } from "../utils/market.js";
 
 export interface BalancePayload {
   userId: string;
@@ -22,12 +23,13 @@ export function handleBalance(
 
   // If a specific asset was requested
   if (asset) {
-    const balance = userBalances[asset];
+    const requestedAsset = assertAssetName(asset);
+    const balance = userBalances[requestedAsset];
 
     if (!balance) {
       return {
         userId,
-        asset,
+        asset: requestedAsset,
         available: 0,
         locked: 0,
       };
@@ -35,7 +37,7 @@ export function handleBalance(
 
     return {
       userId,
-      asset,
+      asset: requestedAsset,
       available: balance.available,
       locked: balance.locked,
     };

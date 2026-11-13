@@ -1,4 +1,5 @@
 import { BALANCES } from "../store/exchange-store.js";
+import { assertAssetName } from "../utils/market.js";
 
 interface WithdrawPayload {
   userId: string;
@@ -9,14 +10,11 @@ interface WithdrawPayload {
 export function handleWithdraw(
   payload: WithdrawPayload,
 ) {
-  const { userId, asset, amount } = payload;
+  const { userId, amount } = payload;
+  const asset = assertAssetName(payload.asset);
 
   if (!userId) {
     throw new Error("userId is required");
-  }
-
-  if (!asset) {
-    throw new Error("asset is required");
   }
 
   if (!Number.isFinite(amount) || amount <= 0) {
