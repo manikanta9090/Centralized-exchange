@@ -28,8 +28,12 @@ export function matchOrders(
     book.bids.length > 0 &&
     book.asks.length > 0
   ) {
-    const bestBid = book.bids[0];
-    const bestAsk = book.asks[0];
+   const bestBid = book.bids[0];
+const bestAsk = book.asks[0];
+
+if (!bestBid || !bestAsk) {
+  break;
+}
 
     if (bestBid.price < bestAsk.price) {
       break;

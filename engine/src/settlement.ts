@@ -1,3 +1,4 @@
+
 import { BALANCES } from "./store/exchange-store.js";
 import type { Trade } from "./matching-engine.js";
 
@@ -27,6 +28,27 @@ export function settleTrade(trade: Trade): void {
     throw new Error("seller balance not found");
   }
 
+  // Initialize missing asset balances.
+  buyerBalances[baseAsset] ??= {
+    available: 0,
+    locked: 0,
+  };
+
+  buyerBalances[quoteAsset] ??= {
+    available: 0,
+    locked: 0,
+  };
+
+  sellerBalances[baseAsset] ??= {
+    available: 0,
+    locked: 0,
+  };
+
+  sellerBalances[quoteAsset] ??= {
+    available: 0,
+    locked: 0,
+  };
+
   const tradeValue =
     trade.price * trade.quantity;
 
@@ -42,33 +64,8 @@ export function settleTrade(trade: Trade): void {
   const sellerQuoteBalance =
     sellerBalances[quoteAsset];
 
-  if (!buyerQuoteBalance) {
-    throw new Error(
-      `buyer ${quoteAsset} balance not found`,
-    );
-  }
-
-  if (!buyerBaseBalance) {
-    throw new Error(
-      `buyer ${baseAsset} balance not found`,
-    );
-  }
-
-  if (!sellerBaseBalance) {
-    throw new Error(
-      `seller ${baseAsset} balance not found`,
-    );
-  }
-
-  if (!sellerQuoteBalance) {
-    throw new Error(
-      `seller ${quoteAsset} balance not found`,
-    );
-  }
-
   if (
-    buyerQuoteBalance.locked <
-    tradeValue
+    buyerQuoteBalance.locked < tradeValue
   ) {
     throw new Error(
       "buyer locked balance is insufficient",
@@ -76,20 +73,18 @@ export function settleTrade(trade: Trade): void {
   }
 
   if (
-    sellerBaseBalance.locked <
-    trade.quantity
+    sellerBaseBalance.locked < trade.quantity
   ) {
     throw new Error(
       "seller locked balance is insufficient",
     );
   }
 
+  // Transfer quote asset from buyer to seller.
   buyerQuoteBalance.locked -= tradeValue;
-  buyerBaseBalance.available +=
-    trade.quantity;
+  sellerQuoteBalance.available += tradeValue;
 
-  sellerBaseBalance.locked -=
-    trade.quantity;
-  sellerQuoteBalance.available +=
-    tradeValue;
+  // Transfer base asset from seller to buyer.
+  sellerBaseBalance.locked -= trade.quantity;
+  buyerBaseBalance.available += trade.quantity;
 }

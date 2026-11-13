@@ -228,6 +228,10 @@ export function handleCancelOrder(
       const order =
         book.bids[bidIndex];
 
+        if (!order) {
+  throw new Error("order not found");
+}
+
       if (order.userId !== userId) {
         throw new Error(
           "you do not own this order",
@@ -250,6 +254,10 @@ export function handleCancelOrder(
     if (askIndex !== -1) {
       const order =
         book.asks[askIndex];
+
+        if (!order) {
+  throw new Error("order not found");
+}
 
       if (order.userId !== userId) {
         throw new Error(
